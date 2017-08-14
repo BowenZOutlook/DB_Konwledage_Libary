@@ -1,0 +1,357 @@
+GoldenGate 安装,配置文档,Extract集成模式和经典模式互相切换,Extract经典模式和ADG模式互相切换
+
+第一节,GoldenGate 安装和配置
+1. 环境准备 
+   1.1 防火墙的开通,如下列表
+   source   port        destination justification
+   extract  7809        replicat    
+   replicat 7809        extract
+   extract  9001-9010   mgr(collect)
+   
+   1.2 安装JDK
+   
+   1.3 安装GoldenGate(RAC情况下安装,请看附录A)
+   gzip -d {filename}.tar.gz
+   tar -xvof {filename}.tar
+   GGSCI>CREATE SUBDIRS
+   1.3.1 配置环境变量
+   export GG_HOME=xx
+   export PATH=xx
+   export LD_LIBRARY_PATH=xx
+   export JAVA_HOME=xx
+   export OGG_AGENT_HOME=xx
+   export OGG_AGENT_INST_HOME=xx
+   alias       gh='cd $GG_HOME;pwd'
+   alias       gerr='less $GG_HOME/ggserr.log'
+   alias       2oggagent='cd $OGG_AGENT_HOME;pwd'
+   alias       2ogginst='cd $OGG_AGENT_INST_HOME;pwd'
+   alias       ggsci='gh;ggsci'
+   1.3.2 配置wallet文件
+   >gh
+   >cd dirwlt
+   >cp wallet ./
+   
+   1.4 配置DB(DB 版本不同和对DDL支持,请看GoldeGate install and uninstall doc.pdf)
+   1.4.1 检验源库和目标库的字符集,不一样的情况,可以考虑使用参数SOURCECHARSET
+   1，4.2 检验数据库是否开启归档模式,是否开启闪回模式,是否开启强制日志模式,是否开始Supplemental日志,
+         是否开启enable_goldengate_replication参数,检验streams_pool_size大小(一般是1G),
+		 检查UNDO_RETENTION参数
+   select name,log_mode,flashback_on,Force_Logging,supplemental_log_data_min From v$database;
+   #cbd
+   --set flashback_on
+   alter database flashback on;
+   --set force logging
+   alter pluggable database PQA close immediate instances=all;  
+   alter pluggable database PQA open read write restricted force;
+   alter session set container= PQA;
+   alter pluggable database PQA enable force logging;
+   alter system disable restricted session;
+   alter pluggable database PQA open read write instances=all;
+   --set supplemental log
+   alter pluggable database PQA add supplemental log data;
+   --set enable_goldengate_replication parameter
+   alter system set enable_goldengate_replication = true scope=both sid='*';
+   --check streams_pool_size parameter
+   show parameter streams_pool_size
+   --check UNDO_RETENTION parameter
+   show parameter UNDO_RETENTION
+   #no cdb
+   --set flashback_on
+   alter database flashback on;
+   --set force logging
+   alter database force logging;
+   --set supplemental log
+   alter database add supplemental log data;
+   --set enable_goldengate_replication parameter
+   alter system set enable_goldengate_replication = true scope=both sid='*';
+   --check streams_pool_size parameter
+   show parameter streams_pool_size
+   --check UNDO_RETENTION parameter
+   show parameter UNDO_RETENTION
+   1.4.3 创建GoldenGate工作用户
+   #source
+   --cbd
+   create user c##ggadmin identified by XXXXXXXX default tablespace users; 
+   grant create session, dba to c##ggadmin container=all;
+   execute dbms_goldengate_auth.grant_admin_privilege('C##GGADMIN',container=>'ALL',grant_optional_privileges=>'*');
+   grant flashback any table to c##ggadmin;
+   --nocdb
+   create user ggadmin identified by XXXXXXXX default tablespace users;
+   grant create session, dba to ggadmin;
+   execute dbms_goldengate_auth.grant_admin_privilege(‘GGADMIN’, grant_optional_privileges=>'*');
+   grant flashback any table to ggadmin;
+   
+   #target 
+   --cbd
+   alter session set container = PRRSQA ;
+   create user repuser identified by XXXXXXXX ;
+   grant create session, dba to repuser container= current;
+   execute dbms_goldengate_auth.grant_admin_privilege('repuser',container=>'PRRSQA',grant_optional_privileges=>'*');
+   grant flashback any table to repuser;
+   --nocdb
+   create user repuser identified by XXXXXXXX default tablespace users;
+   grant create session, dba to repuser;
+   execute dbms_goldengate_auth.grant_admin_privilege('repuser',grant_optional_privileges=>'*');
+   grant flashback any table to repuser;
+   --create target table schema
+   create user ods_qa_ehi_ora_ehadmin identified by XXXXXXXX default tablespace RRS_DATA;
+   grant create session, resource to ods_qa_ehi_ora_ehadmin;
+
+   1.4.4 配置GoldeGate的 credentialstore
+   #source
+   >gh
+   >ggsci
+   >open wallet  --if have wallet
+   >info masterkey  --if have wallet
+   >add credentialstore
+   >alter credentialstore add user c##ggadmin@qa alias ggadmin
+   password:xxxxx
+   >info credentialstore
+   >dblogin useridalias ggadmin
+   
+   #target
+   >gh
+   >ggsci
+   >open wallet  --if have wallet
+   >info masterkey  --if have wallet
+   >add credentialstore
+   >alter credentialstore add user repuser@prrsqa alias rep_rrsqa
+   password:xxxxx
+   >info credentialstore
+   >dblogin useridalias rep_rrsqa
+   
+   1.4.5 配置GoldeGate的mgr
+   #例子
+   >ggsci
+   >edit params mgr
+   port 7809
+   -- autostart er *
+   -- autorestart er *, waitminutes 5, retries 2
+   dynamicportlist 9001-9250
+   accessrule, prog *, ipaddr 10.*.*.*, allow
+   purgeoldextracts ./dirdat/*, usecheckpoints, minkeephours 24
+   startupvalidationdelaycsecs 10
+  
+   
+2. 配置初始化(initload和expdp/impdp)
+   2.1 编辑capture和pump进程
+   #例子
+   ##capture
+   extract eqaehio
+   statoptions reportfetch
+   reportcount 15 minutes, rate
+   encrypttrail AES128
+   useridalias ggadmin
+   logallsupcols
+   updaterecordformat compact
+   tranlogoptions includeregionid 
+   dboptions allowunusedcolumn
+   exttrail ./dirdat/qa
+   ddl include mapped &
+     optype alter &
+     objtype 'table' &
+     eventactions (log info)
+   sourcecatalog pqa
+   TABLE EHADMIN.ADDRESS;
+   ...
+   ##pump
+   extract pqa_qb
+   passthru
+   reportcount 15 minutes, rate
+   rmthost sjdevdb06, mgrport 7809, encrypt AES128
+   rmttrail ./dirdat/qb
+   sourcecatalog pqa
+   table EHADMIN.ADDRESS;
+   ...
+   
+   2.2 添加capture和pump进程
+   >ggsci
+   >dblogin useridalias ggadmin
+   >add trandata pqa.ehadmin.policy 
+   >register extract eqaehio database container(pqa)
+   >add extract eqaehio, integrated tranlog, begin now
+   >add exttrail ./dirdat/qa, extract eqaehio, megabytes 1000
+   >add extract pqaehio, exttrailsource ./dirdat/ehiora/qa begin now
+   >add rmttrail ./dirdat/qa, extract pqaehio, megabytes 1000
+   >start extract eqaehio
+   >start extract pqaehio
+   
+   2.3 initload方法(使用这步,跳过2.4步)
+   2.3.1 init source capture
+   #例子
+   extract efainit
+   useridalias ggadmin
+   rmthost sjdevdb02, mgrport 7809, encrypt AES128
+   rmttask replicat, group rfainit 
+   table EHTEMP.OGG_TEST01;
+   ...
+   
+   add extract efainit, sourceistable
+   info extract efainit, tasks
+   
+   2.3.2 init target replicat
+   #例子
+   replicat rfainit
+   assumetargetdefs
+   useridalias rep_test2
+   discardfile ./dirrpt/rfainit.dsc, purge
+   map EHTEMP.OGG_TEST01, TARGET test2.ODS_INT_EHI_ORA_EHTEMP.OGG_TEST01; 
+   ...
+
+   add replicat rfainit, specialrun
+   info replicat rfainit, tasks
+   
+   2.3.3 启动initload
+   #source
+   >start extract efainit
+   >view report efainit
+   #target
+   >view report rfainit
+   
+   2.3.4 配置checkpointtable(可配置也可以不配置)
+   #target
+   >ggsci
+   >EDIT PARAMS ./GLOBALS 
+   CHECKPOINTTABLE <owner/schema>.ggschkpt
+   >exit
+   >ggsci
+   >dblogin useridalias rep_test2
+   >add checkpointtable
+ 
+   2.4 expdp/impdp的方式(使用这步,跳过2.3步)
+   2.4.1 expdp 数据
+   column CURRENT_SCN format 9999999999999
+   SELECT current_scn from v$database ;
+   > cd /home/oracle/exp
+   > cat expdp_member_table.par
+   DIRECTORY=EHI
+   DUMPFILE=test_member.dmp
+   LOGFILE=test_member.log
+   TABLES=EHADMIN.member
+   INCLUDE=TABLE/TABLE, TABLE_DATA, INDEX:"IN (select upper(index_name) from dba_constraints c where c.constraint_type = 'P' and OWNER = 'EHADMIN')", CONSTRAINT:"IN (select upper(constraint_name) from dba_constraints c where c.constraint_type = 'P' and OWNER = 'EHADMIN')" 
+
+   >expdp system/${REPLY}@pqa2 parfile=expdp_member_table.par flashback_scn=69832399513
+   
+   2.4.2 impdp 数据
+   scp dmp 文件到目标库
+   > cat impdb_member_table.par
+   DIRECTORY=EXPDIR
+   DUMPFILE=test_member.dmp
+   LOGFILE=test_member_import.log
+   TABLES=(EHADMIN.MEMBER)
+   REMAP_TABLESPACE=EHI_ENCRYPT:RRS_DATA,EHI_APP:RRS_DATA,EHI_IDX:RRS_IDX
+   REMAP_SCHEMA=ehadmin:ODS_QA_EHI_ORA_EHADMIN
+   impdp system/${REPLY}@prrsqa parfile=impdb_member_table.par
+
+3. 配置delivery,并启动
+   3.1 配置replicat 
+   #例子
+   replicat rfaehio
+   -- assumetargetdefs
+   sourcecharset override we8mswin1252
+   reportcount 15 minutes, rate
+   useridalias rep_test2
+   discardfile ./dirrpt/rfaehio.DSC, purge
+   --handlecollisions
+   ddl include mapped &
+     optype alter &
+     objtype 'table' &
+     eventactions (log info, shell('echo TABLE DDL: $1', var $1 =@ddl(text))) &
+     exclude mapped instrwords 'ALTER CONSTRAINT'
+     -- eventactions (log info, shell('echo TABLE DDL: $1', var $1 =@ddl(text))) 
+   ddlerror default abend
+   DBOPTIONS ENABLE_INSTANTIATION_FILTERING
+   map EHTEMP.OGG_TEST01, TARGET test2.ODS_INT_EHI_ORA_EHTEMP.OGG_TEST01;
+   ...
+   
+   3.2 添加replicat 进程
+   add replicat rfaehio, integrated, exttrail ./dirdat/qa
+   --expdp/impdp先使用这个启动;initload跳过这步
+   start replicat rfaehio aftercsn xxxx
+   --expdp/impdp aftercsn使用;initload 直接只用
+   start replicat rfaehio
+
+   
+第二节,GoldenGate集成模式和经典模式互相切换
+  1. GoldenGate 降级为经典模式 
+     1.1 检验capture进程并停止进程
+	 >ggsci
+	 >dblogin useridalias ggadmin
+	 --check if have transactions
+	 >send extract efaehio,showtrans
+	 >info extract efaehio downgrade
+	 >stop extract efaehio
+	 >info extract efaehio
+	 1.2 修改capture配置文件
+	 a. 若没安装经典模式ddl支持包,请comment ddl参数
+	 b. TRANLOGOPTIONS添加DBLOGREADER参数
+	    例子：TRANLOGOPTIONS INCLUDEREGIONID, DBLOGREADER
+     c. 有加密的请注意添加DECRYPTPASSWORD参数
+	    例子：
+		DBOPTIONS ALLOWUNUSEDCOLUMN &
+           DECRYPTPASSWORD xxx AES128 ENCRYPTKEY ggkey
+     1.3 降级集成模式
+	 >ggsci
+	 >dblogin useridalias ggadmin
+	 -- need change threads number to reflect to the RAC 
+	 >alter extract EPAEHIO downgrade integrated tranlog threads 6
+	 >unregister extract EPAEHIO database 
+	 >start extract EPAEHIO
+	 >info all
+	 >stats EXTRACT EPAEHIO, table EHADMIN.CUSTOMER_SCRIPT_SESSION
+	 #on target 
+	 >ggsci
+	 >stats replicat RPBEHIO, table EHADMIN.CUSTOMER_SCRIPT_SESSION
+	 1.4 降级注意事项
+	 a. send extract efaehio,showtrans -- 需要查看是否还有未完成的事务
+	 b. 在1.1步骤完成后，请注意查看extract的checkpoint点和sequence是否每个线程都有值
+  2. GoldenGate 升级为经典模式 
+	 2.1 检验capture进程并停止进程
+	 >ggsci
+	 >dblogin useridalias ggadmin
+	 >send extract efaehio, showtrans
+	 >stop extract efaehio
+	 >info extract efaehio
+	 >info all
+	 2.2 注册并升级capture
+	 >register extract efaehio database
+	 >start extract efaehio
+	 >info all
+	 >info extract efaehio upgrade
+	 >stop extract efaehio
+	 >info extract efaehio
+	 >info all
+	 >alter extract EPAEHIO upgrade integrated tranlog
+	 2.3 修改capture配置文件
+	 a. 启动ddl复制配置
+	 b. 移除DBLOGREADER参数
+	 c. 有加密的请注意移除DECRYPTPASSWORD参数
+	 2.4 启动capture
+	 >start extract efaehio
+	 >info all
+	 >stats EXTRACT EPAEHIO, table EHADMIN.CUSTOMER_SCRIPT_SESSION
+	 
+第三节,Extract经典模式和ADG模式互相切换
+  1. 经典模式切换成ADG模式
+     1.1 修改capture配置文件
+	 添加参数MINEFROMACTIVEDG到TRANLOGOPTIONS
+	 例子：
+	 TRANLOGOPTIONS INCLUDEREGIONID, DBLOGREADER , MINEFROMACTIVEDG
+     1.2 启动capture
+     >start extract efaehio
+	 >alter extract efaehio scn xxxx
+	 2017-08-03 05:48:19  ERROR   OGG-02803  Oracle GoldenGate Capture for Oracle, ecaehio.prm:  Encountered a Data Guard role transition. Alter Extract to SCN 73,458,160,806 and restart Extract, or recreate Extract with the correct number of threads at SCN 73,458,160,806.
+	 >start extract efaehio
+     1.3 注意,如果线程数不对,请执行以下操作
+	 >drop extract efaehio
+	 select * from v$thread
+	 >add extract efaehio thread x begin scn xxxx
+	 >start exctract efaehio
+  2. ADG模式切换成经典模式
+     1.1 修改capture配置文件
+     移除MINEFROMACTIVEDG参数 
+     1.2 启动capture
+     >ggsci
+	 >alter extract efaehio scn xxxx
+	 >start extract efaehio
+	

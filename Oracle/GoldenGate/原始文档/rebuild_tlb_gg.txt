@@ -1,0 +1,124 @@
+
+### Need find out which REPLICA and TABLE are broken, and set below variable(ABENDED_REPLICAT & ABENDED_TABLE). 
+### Only support RPBEHIO currently. RPDRRSO does not support now.
+
+export  ABENDED_REPLICAT="RPBEHIO"
+export  ABENDED_TABLE="AGENT_STATE_OF_LICENSURE"
+
+export DT="`date '+%Y%m%d'`"
+
+case ${ABENDED_REPLICAT} in
+        RPBEHIO )
+                REP_PAR_FILE="rpbehio.prm"
+                SOURCE_DB="SJPROD"
+                SOURCE_SCHEMA="EHADMIN"
+                SOURCE_DB_SYSTEM_PWD='xxxxxxxx'
+                TARGET_SCHEMA="ODS_PR_EHI_ORA_EHADMIN"
+                TARGET_DB_PWD="xxxxxxxx" # no need currently
+                DB_LINK_2SRC=SJPROD
+                DUMP_DIR=/u02/dump
+                DUMP_DB_DIR=EXPDIR
+                EXP_TMPL=expdp_ehi_2dw_template.par
+                IMP_TMPL=impdp_ehi_2dw_template.par
+                ;;
+    *   )  
+                printf "\n Please input {RPBEHIO|RPDRRSO} for ABENDED REPLICAT\n" 
+                exit 1
+                ;;
+esac
+ 
+# 1 Switch synonym to point to DWREMOTE
+...
+ 
+# 2.1 Stop replicat process
+$GG_HOME/ggsci -s > /tmp/reload_gg_table_${ABENDED_TABLE}.log <<EOF
+info all
+stop REPLICAT ${ABENDED_REPLICAT}
+info all
+exit
+EOF
+
+# 2.2 Comment the table that block the replicat
+cd $GG_HOME/dirprm
+cp ${REP_PAR_FILE} ${REP_PAR_FILE}.bak4suspend_${DT}
+sed -i "/\.${ABENDED_TABLE}\,/ s/^/-- /g" ${REP_PAR_FILE}
+
+# 2.3 Restart the replicat with the error table eliminated
+$GG_HOME/ggsci -s >> /tmp/reload_gg_table_${ABENDED_TABLE}.log <<EOF
+START REPLICAT ${ABENDED_REPLICAT}
+info all
+exit
+EOF
+
+# 3.1 get SCN on Source DB
+function get_src_current_scn {
+  sqlplus -s SYSTEM/${SOURCE_DB_SYSTEM_PWD}@${SOURCE_DB} <<+
+    set pagesize 0
+    set linesize 100
+    set heading off
+    set feedback off
+    column CURRENT_SCN format 9999999999999
+    select CURRENT_SCN from v\$database;
+    exit
++
+}
+
+SRC_CURRENT_SCN=`get_src_current_scn`
+echo "Current SCN on ${SOURCE_DB} is ${SRC_CURRENT_SCN}"
+
+# 3.2 Dump source table
+cd ${DUMP_DIR}
+EXP_PAR=`echo ${EXP_TMPL} | sed "s/template/4${ABENDED_TABLE}/"`
+cp ${EXP_TMPL} ${EXP_PAR}
+DUMP_FILE=`echo ${EXP_PAR} | sed "s/\.par$/_${DT}.dmp/"`
+DUMP_LOG_FILE=`echo ${EXP_PAR} | sed "s/\.par$/_${DT}.log/"`
+sed -i "s/^TABLES=XXXX/TABLES=${SOURCE_SCHEMA}\.${ABENDED_TABLE}/g" ${EXP_PAR}
+sed -i "s/^DUMPFILE=.\+$/DUMPFILE=${DUMP_FILE}/g" ${EXP_PAR}
+sed -i "s/^LOGFILE=.\+$/LOGFILE=${DUMP_LOG_FILE}/g" ${EXP_PAR}
+
+expdp system/${SOURCE_DB_SYSTEM_PWD}@${SOURCE_DB} parfile=${EXP_PAR} flashback_scn=${SRC_CURRENT_SCN}
+echo "Need MANUALLY scp dump file ${DUMP_DIR}/${DUMP_FILE} from Source to Target"
+
+
+# 3.3 Drop the error table on Target
+# sqlplus ${TARGET_SCHEMA}/${DB_PWD}  <<EOF
+sqlplus ' / as sysdba'  <<EOF
+-- select count(*) from ${TARGET_SCHEMA}.${ABENDED_TABLE};
+drop table ${TARGET_SCHEMA}.${ABENDED_TABLE};
+exit
+EOF
+
+# 3.4 Stop replicat process
+$GG_HOME/ggsci -s >> /tmp/reload_gg_table_${ABENDED_TABLE}.log <<EOF
+info all
+stop REPLICAT ${ABENDED_REPLICAT}
+info all
+exit
+EOF
+
+# 3.5 Import table
+cd ${DUMP_DIR}
+IMP_PAR=`echo ${IMP_TMPL} | sed "s/template/4${ABENDED_TABLE}/"`
+cp ${IMP_TMPL} ${IMP_PAR}
+IMPORT_LOG_FILE=`echo ${IMP_PAR} | sed "s/\.par$/_${DT}.log/"`
+sed -i "s/^DUMPFILE=.\+$/DUMPFILE=${DUMP_FILE}/g" ${IMP_PAR}
+sed -i "s/^LOGFILE=.\+$/LOGFILE=${IMPORT_LOG_FILE}/g" ${IMP_PAR}
+
+impdp \"/ as sysdba\" parfile=${IMP_PAR}
+
+
+# 3.6 Add table back in parameter file
+cd $GG_HOME/dirprm
+cp ${REP_PAR_FILE} ${REP_PAR_FILE}.bak4restore_${DT}
+sed -i "/\.${ABENDED_TABLE}\,/ s/^-- \+//g" ${REP_PAR_FILE}
+
+# 3.7 Start replicat process
+$GG_HOME/ggsci -s >> /tmp/reload_gg_table_${ABENDED_TABLE}.log <<EOF
+info all
+start REPLICAT ${ABENDED_REPLICAT}
+info all
+exit
+EOF
+
+# 4. Switch synonym to point to DWREMOTE
+...

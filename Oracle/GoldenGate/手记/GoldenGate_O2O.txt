@@ -231,6 +231,7 @@ GoldenGate 安装,配置文档,Extract集成模式和经典模式互相切换,Ex
    INCLUDE=TABLE/TABLE, TABLE_DATA, INDEX:"IN (select upper(index_name) from dba_constraints c where c.constraint_type = 'P' and OWNER = 'EHADMIN')", CONSTRAINT:"IN (select upper(constraint_name) from dba_constraints c where c.constraint_type = 'P' and OWNER = 'EHADMIN')" 
 
    >expdp system/${REPLY}@pqa2 parfile=expdp_member_table.par flashback_scn=69832399513
+   -- ESTIMATE_ONLY=y ESTIMATE=statistics or ESTIMATE=blocks
    
    2.4.2 impdp 数据
    scp dmp 文件到目标库
